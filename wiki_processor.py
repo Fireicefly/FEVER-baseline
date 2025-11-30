@@ -62,24 +62,30 @@ class WikipediaProcessor:
         """
         lines = page.get('lines', '')
 
-        # Parse lines to extract sentences
-        if isinstance(lines, str):
-            lines = json.loads(lines) if lines else []
-
         sentences = []
         full_text = []
 
-        for line_data in lines:
-            if isinstance(line_data, dict):
-                sent_id = line_data.get('sentence_id', 0)
-                sent_text = line_data.get('sentence', '')
+        # Parse lines - they are tab-separated strings, not JSON
+        # Format: sentence_id\tsentence_text[\tentity_text\tentity_link\t...]
+        if isinstance(lines, str) and lines.strip():
+            # Split by newlines to get individual line entries
+            for line in lines.strip().split('\n'):
+                if '\t' in line:
+                    parts = line.split('\t')
+                    if len(parts) >= 2:
+                        try:
+                            sent_id = int(parts[0])
+                            sent_text = parts[1]  # Sentence is the second field
 
-                # Store sentence with ID
-                sentences.append({
-                    'id': sent_id,
-                    'text': sent_text
-                })
-                full_text.append(sent_text)
+                            # Store sentence with ID
+                            sentences.append({
+                                'id': sent_id,
+                                'text': sent_text
+                            })
+                            full_text.append(sent_text)
+                        except (ValueError, IndexError):
+                            # Skip malformed lines
+                            continue
 
         self.page_sentences[page_id] = sentences
         self.page_texts[page_id] = ' '.join(full_text)

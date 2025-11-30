@@ -36,6 +36,22 @@ def prepare_evidence_text(evidence_sentences):
     return ' '.join(texts)
 
 
+def save_cached_evidence(evidence_list, cache_path):
+    """Save retrieved evidence to cache file."""
+    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+    with open(cache_path, 'w', encoding='utf-8') as f:
+        json.dump(evidence_list, f)
+    print(f"Evidence cached to {cache_path}")
+
+
+def load_cached_evidence(cache_path):
+    """Load cached evidence if it exists."""
+    if os.path.exists(cache_path):
+        with open(cache_path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    return None
+
+
 def train_epoch(model, dataloader, criterion, optimizer, device):
     """Train for one epoch."""
     model.train()
@@ -142,7 +158,8 @@ def main():
 
         # Use full evidence retrieval
         evidence_retriever = EvidenceRetrieval(wiki_processor)
-        evidence_retriever.build_index()
+        print(f"\nBuilding/loading TF-IDF index (cache: {config.MODEL_DIR})...")
+        evidence_retriever.build_index(cache_dir=config.MODEL_DIR)
     else:
         print("\nUsing mock Wikipedia processor (oracle mode)...")
         wiki_processor = MockWikipediaProcessor()
@@ -150,34 +167,80 @@ def main():
         # Use oracle evidence retrieval
         evidence_retriever = OracleEvidenceRetrieval(wiki_processor)
 
-    # Retrieve evidence for all training examples
+    # Retrieve evidence for all training examples (with caching)
     print("\nRetrieving evidence for training data...")
-    train_evidence = []
-    for item in tqdm(train_data, desc="Train evidence"):
-        if isinstance(evidence_retriever, OracleEvidenceRetrieval):
-            evidence = evidence_retriever.retrieve_evidence(
-                item['claim'],
-                item.get('evidence', [])
-            )
-        else:
-            evidence = evidence_retriever.retrieve_evidence(item['claim'])
+    train_evidence_cache = f"{config.MODEL_DIR}/train_evidence_cache.json"
+    train_evidence = load_cached_evidence(train_evidence_cache)
 
-        evidence_text = prepare_evidence_text(evidence)
-        train_evidence.append(evidence_text)
+    if train_evidence is not None:
+        print(f"✓ Loaded cached evidence for {len(train_evidence)} training examples")
+    else:
+        print("Building evidence cache for training data...")
+        train_evidence = []
+
+        if isinstance(evidence_retriever, OracleEvidenceRetrieval):
+            # Oracle mode: must retrieve individually (needs gold evidence per claim)
+            for item in tqdm(train_data, desc="Train evidence"):
+                evidence = evidence_retriever.retrieve_evidence(
+                    item['claim'],
+                    item.get('evidence', [])
+                )
+                evidence_text = prepare_evidence_text(evidence)
+                train_evidence.append(evidence_text)
+        else:
+            # Multi-threaded batch retrieval (>10x faster!)
+            print("Using multi-threaded batch retrieval...")
+            train_claims = [item['claim'] for item in train_data]
+
+            # Process in batches with progress bar
+            batch_size = 1000  # Process 1000 claims at a time
+            for i in tqdm(range(0, len(train_claims), batch_size), desc="Train evidence batches"):
+                batch_claims = train_claims[i:i+batch_size]
+                batch_evidence = evidence_retriever.retrieve_evidence_batch(batch_claims)
+
+                for evidence in batch_evidence:
+                    evidence_text = prepare_evidence_text(evidence)
+                    train_evidence.append(evidence_text)
+
+        # Cache the retrieved evidence
+        save_cached_evidence(train_evidence, train_evidence_cache)
 
     print("\nRetrieving evidence for dev data...")
-    dev_evidence = []
-    for item in tqdm(dev_data, desc="Dev evidence"):
-        if isinstance(evidence_retriever, OracleEvidenceRetrieval):
-            evidence = evidence_retriever.retrieve_evidence(
-                item['claim'],
-                item.get('evidence', [])
-            )
-        else:
-            evidence = evidence_retriever.retrieve_evidence(item['claim'])
+    dev_evidence_cache = f"{config.MODEL_DIR}/dev_evidence_cache.json"
+    dev_evidence = load_cached_evidence(dev_evidence_cache)
 
-        evidence_text = prepare_evidence_text(evidence)
-        dev_evidence.append(evidence_text)
+    if dev_evidence is not None:
+        print(f"✓ Loaded cached evidence for {len(dev_evidence)} dev examples")
+    else:
+        print("Building evidence cache for dev data...")
+        dev_evidence = []
+
+        if isinstance(evidence_retriever, OracleEvidenceRetrieval):
+            # Oracle mode: must retrieve individually (needs gold evidence per claim)
+            for item in tqdm(dev_data, desc="Dev evidence"):
+                evidence = evidence_retriever.retrieve_evidence(
+                    item['claim'],
+                    item.get('evidence', [])
+                )
+                evidence_text = prepare_evidence_text(evidence)
+                dev_evidence.append(evidence_text)
+        else:
+            # Multi-threaded batch retrieval (>10x faster!)
+            print("Using multi-threaded batch retrieval...")
+            dev_claims = [item['claim'] for item in dev_data]
+
+            # Process in batches with progress bar
+            batch_size = 1000  # Process 1000 claims at a time
+            for i in tqdm(range(0, len(dev_claims), batch_size), desc="Dev evidence batches"):
+                batch_claims = dev_claims[i:i+batch_size]
+                batch_evidence = evidence_retriever.retrieve_evidence_batch(batch_claims)
+
+                for evidence in batch_evidence:
+                    evidence_text = prepare_evidence_text(evidence)
+                    dev_evidence.append(evidence_text)
+
+        # Cache the retrieved evidence
+        save_cached_evidence(dev_evidence, dev_evidence_cache)
 
     # Build vocabulary
     print("\nBuilding vocabulary...")

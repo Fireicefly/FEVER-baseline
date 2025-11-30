@@ -97,7 +97,8 @@ def evaluate_model(model_path: str, data_file: str, output_file: str = None):
         wiki_processor.load_wikipedia_pages()
 
         evidence_retriever = EvidenceRetrieval(wiki_processor)
-        evidence_retriever.build_index()
+        print(f"\nBuilding/loading TF-IDF index (cache: {config.MODEL_DIR})...")
+        evidence_retriever.build_index(cache_dir=config.MODEL_DIR)
     else:
         print("\nUsing mock Wikipedia processor (oracle mode)...")
         wiki_processor = MockWikipediaProcessor()
@@ -108,18 +109,31 @@ def evaluate_model(model_path: str, data_file: str, output_file: str = None):
     eval_evidence = []
     predicted_evidence_list = []  # Store for FEVER score computation
 
-    for item in tqdm(eval_data, desc="Evidence retrieval"):
-        if isinstance(evidence_retriever, OracleEvidenceRetrieval):
+    if isinstance(evidence_retriever, OracleEvidenceRetrieval):
+        # Oracle mode: must retrieve individually (needs gold evidence per claim)
+        for item in tqdm(eval_data, desc="Evidence retrieval"):
             evidence = evidence_retriever.retrieve_evidence(
                 item['claim'],
                 item.get('evidence', [])
             )
-        else:
-            evidence = evidence_retriever.retrieve_evidence(item['claim'])
+            evidence_text = prepare_evidence_text(evidence)
+            eval_evidence.append(evidence_text)
+            predicted_evidence_list.append(evidence)
+    else:
+        # Multi-threaded batch retrieval (>10x faster!)
+        print("Using multi-threaded batch retrieval...")
+        eval_claims = [item['claim'] for item in eval_data]
 
-        evidence_text = prepare_evidence_text(evidence)
-        eval_evidence.append(evidence_text)
-        predicted_evidence_list.append(evidence)  # Store for FEVER score
+        # Process in batches with progress bar
+        batch_size = 1000  # Process 1000 claims at a time
+        for i in tqdm(range(0, len(eval_claims), batch_size), desc="Evidence batches"):
+            batch_claims = eval_claims[i:i+batch_size]
+            batch_evidence = evidence_retriever.retrieve_evidence_batch(batch_claims)
+
+            for evidence in batch_evidence:
+                evidence_text = prepare_evidence_text(evidence)
+                eval_evidence.append(evidence_text)
+                predicted_evidence_list.append(evidence)
 
     # Create dataset
     print("\nCreating dataset...")
