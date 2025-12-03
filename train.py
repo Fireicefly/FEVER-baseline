@@ -36,20 +36,44 @@ def prepare_evidence_text(evidence_sentences):
     return ' '.join(texts)
 
 
-def save_cached_evidence(evidence_list, cache_path):
-    """Save retrieved evidence to cache file."""
+def save_cached_evidence(evidence_list, evidence_structured_list, cache_path):
+    """
+    Save retrieved evidence to cache file.
+    
+    Args:
+        evidence_list: List of concatenated evidence text strings
+        evidence_structured_list: List of lists of (page_id, sent_id, sent_text) tuples
+        cache_path: Path to save cache file
+    """
     os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+    cache_data = {
+        'evidence_text': evidence_list,
+        'evidence_structured': evidence_structured_list
+    }
     with open(cache_path, 'w', encoding='utf-8') as f:
-        json.dump(evidence_list, f)
+        json.dump(cache_data, f)
     print(f"Evidence cached to {cache_path}")
 
 
 def load_cached_evidence(cache_path):
-    """Load cached evidence if it exists."""
+    """
+    Load cached evidence if it exists.
+    
+    Returns:
+        Tuple of (evidence_text_list, evidence_structured_list) or (None, None)
+    """
     if os.path.exists(cache_path):
         with open(cache_path, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    return None
+            data = json.load(f)
+            
+        # Handle both old and new cache formats
+        if isinstance(data, dict) and 'evidence_text' in data:
+            # New format with structured evidence
+            return data['evidence_text'], data['evidence_structured']
+        else:
+            # Old format (just text strings) - return None for structured
+            return data, None
+    return None, None
 
 
 def train_epoch(model, dataloader, criterion, optimizer, device):
@@ -156,8 +180,8 @@ def main():
         wiki_processor = WikipediaProcessor()
         wiki_processor.load_wikipedia_pages()
 
-        # Use full evidence retrieval
-        evidence_retriever = EvidenceRetrieval(wiki_processor)
+        # Use full evidence retrieval (use_drqa=False to use sklearn-based retriever)
+        evidence_retriever = EvidenceRetrieval(wiki_processor, use_drqa=False)
         print(f"\nBuilding/loading TF-IDF index (cache: {config.MODEL_DIR})...")
         evidence_retriever.build_index(cache_dir=config.MODEL_DIR)
     else:
@@ -170,13 +194,15 @@ def main():
     # Retrieve evidence for all training examples (with caching)
     print("\nRetrieving evidence for training data...")
     train_evidence_cache = f"{config.MODEL_DIR}/train_evidence_cache.json"
-    train_evidence = load_cached_evidence(train_evidence_cache)
+    train_evidence_text, train_evidence_structured = load_cached_evidence(train_evidence_cache)
 
-    if train_evidence is not None:
-        print(f"✓ Loaded cached evidence for {len(train_evidence)} training examples")
+    if train_evidence_text is not None:
+        print(f"✓ Loaded cached evidence for {len(train_evidence_text)} training examples")
+        train_evidence = train_evidence_text
     else:
         print("Building evidence cache for training data...")
         train_evidence = []
+        train_evidence_structured_list = []
 
         if isinstance(evidence_retriever, OracleEvidenceRetrieval):
             # Oracle mode: must retrieve individually (needs gold evidence per claim)
@@ -187,6 +213,7 @@ def main():
                 )
                 evidence_text = prepare_evidence_text(evidence)
                 train_evidence.append(evidence_text)
+                train_evidence_structured_list.append(evidence)
         else:
             # Multi-threaded batch retrieval (>10x faster!)
             print("Using multi-threaded batch retrieval...")
@@ -201,19 +228,22 @@ def main():
                 for evidence in batch_evidence:
                     evidence_text = prepare_evidence_text(evidence)
                     train_evidence.append(evidence_text)
+                    train_evidence_structured_list.append(evidence)
 
-        # Cache the retrieved evidence
-        save_cached_evidence(train_evidence, train_evidence_cache)
+        # Cache both text and structured evidence
+        save_cached_evidence(train_evidence, train_evidence_structured_list, train_evidence_cache)
 
     print("\nRetrieving evidence for dev data...")
     dev_evidence_cache = f"{config.MODEL_DIR}/dev_evidence_cache.json"
-    dev_evidence = load_cached_evidence(dev_evidence_cache)
+    dev_evidence_text, dev_evidence_structured = load_cached_evidence(dev_evidence_cache)
 
-    if dev_evidence is not None:
-        print(f"✓ Loaded cached evidence for {len(dev_evidence)} dev examples")
+    if dev_evidence_text is not None:
+        print(f"✓ Loaded cached evidence for {len(dev_evidence_text)} dev examples")
+        dev_evidence = dev_evidence_text
     else:
         print("Building evidence cache for dev data...")
         dev_evidence = []
+        dev_evidence_structured_list = []
 
         if isinstance(evidence_retriever, OracleEvidenceRetrieval):
             # Oracle mode: must retrieve individually (needs gold evidence per claim)
@@ -224,6 +254,7 @@ def main():
                 )
                 evidence_text = prepare_evidence_text(evidence)
                 dev_evidence.append(evidence_text)
+                dev_evidence_structured_list.append(evidence)
         else:
             # Multi-threaded batch retrieval (>10x faster!)
             print("Using multi-threaded batch retrieval...")
@@ -238,9 +269,10 @@ def main():
                 for evidence in batch_evidence:
                     evidence_text = prepare_evidence_text(evidence)
                     dev_evidence.append(evidence_text)
+                    dev_evidence_structured_list.append(evidence)
 
-        # Cache the retrieved evidence
-        save_cached_evidence(dev_evidence, dev_evidence_cache)
+        # Cache both text and structured evidence
+        save_cached_evidence(dev_evidence, dev_evidence_structured_list, dev_evidence_cache)
 
     # Build vocabulary
     print("\nBuilding vocabulary...")

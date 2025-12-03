@@ -50,7 +50,7 @@ NUM_LAYERS = 2  # Number of layers in feed-forward networks
 DROPOUT = 0.2
 BATCH_SIZE = 32
 LEARNING_RATE = 0.05
-NUM_EPOCHS = 2
+NUM_EPOCHS = 10
 NUM_CLASSES = 3  # SUPPORTS, REFUTES, NOT ENOUGH INFO
 
 # Device

@@ -32,7 +32,7 @@ def evaluate_model(model_path=None, data_path=None, output_path=None):
     if data_path is None:
         data_path = config.DEV_FILE
 
-    (model_path, data_path, output_path)
+    evaluate_model(model_path, data_path, output_path)
 
 
 def main():

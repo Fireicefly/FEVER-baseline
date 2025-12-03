@@ -28,6 +28,46 @@ def prepare_evidence_text(evidence_sentences):
     return ' '.join(texts)
 
 
+def save_cached_evidence(evidence_list, evidence_structured_list, cache_path):
+    """
+    Save retrieved evidence to cache file.
+    
+    Args:
+        evidence_list: List of concatenated evidence text strings
+        evidence_structured_list: List of lists of (page_id, sent_id, sent_text) tuples
+        cache_path: Path to save cache file
+    """
+    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+    cache_data = {
+        'evidence_text': evidence_list,
+        'evidence_structured': evidence_structured_list
+    }
+    with open(cache_path, 'w', encoding='utf-8') as f:
+        json.dump(cache_data, f)
+    print(f"Evidence cached to {cache_path}")
+
+
+def load_cached_evidence(cache_path):
+    """
+    Load cached evidence if it exists.
+    
+    Returns:
+        Tuple of (evidence_text_list, evidence_structured_list) or (None, None)
+    """
+    if os.path.exists(cache_path):
+        with open(cache_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            
+        # Handle both old and new cache formats
+        if isinstance(data, dict) and 'evidence_text' in data:
+            # New format with structured evidence
+            return data['evidence_text'], data['evidence_structured']
+        else:
+            # Old format (just text strings) - return None for structured
+            return data, None
+    return None, None
+
+
 def predict(model, dataloader, device):
     """
     Make predictions on a dataset.
@@ -96,7 +136,7 @@ def evaluate_model(model_path: str, data_file: str, output_file: str = None):
         wiki_processor = WikipediaProcessor()
         wiki_processor.load_wikipedia_pages()
 
-        evidence_retriever = EvidenceRetrieval(wiki_processor)
+        evidence_retriever = EvidenceRetrieval(wiki_processor, use_drqa=False)
         print(f"\nBuilding/loading TF-IDF index (cache: {config.MODEL_DIR})...")
         evidence_retriever.build_index(cache_dir=config.MODEL_DIR)
     else:
@@ -104,36 +144,63 @@ def evaluate_model(model_path: str, data_file: str, output_file: str = None):
         wiki_processor = MockWikipediaProcessor()
         evidence_retriever = OracleEvidenceRetrieval(wiki_processor)
 
-    # Retrieve evidence
+    # Retrieve evidence (with caching support)
     print("\nRetrieving evidence...")
-    eval_evidence = []
-    predicted_evidence_list = []  # Store for FEVER score computation
-
-    if isinstance(evidence_retriever, OracleEvidenceRetrieval):
-        # Oracle mode: must retrieve individually (needs gold evidence per claim)
-        for item in tqdm(eval_data, desc="Evidence retrieval"):
-            evidence = evidence_retriever.retrieve_evidence(
-                item['claim'],
-                item.get('evidence', [])
-            )
-            evidence_text = prepare_evidence_text(evidence)
-            eval_evidence.append(evidence_text)
-            predicted_evidence_list.append(evidence)
+    
+    # Determine cache filename based on data file
+    data_basename = os.path.basename(data_file).replace('.jsonl', '')
+    eval_evidence_cache = f"{config.MODEL_DIR}/{data_basename}_evidence_cache.json"
+    
+    # Try to load cached evidence first
+    cached_evidence_text, cached_evidence_structured = load_cached_evidence(eval_evidence_cache)
+    
+    if cached_evidence_text is not None and len(cached_evidence_text) == len(eval_data):
+        print(f"✓ Loaded cached evidence for {len(cached_evidence_text)} examples from {eval_evidence_cache}")
+        eval_evidence = cached_evidence_text
+        
+        if cached_evidence_structured is not None:
+            # New cache format with structured evidence
+            predicted_evidence_list = cached_evidence_structured
+            print("  ✓ Structured evidence loaded. FEVER score computation will be accurate.")
+        else:
+            # Old cache format without structured evidence
+            predicted_evidence_list = []
+            print("  Warning: Old cache format detected. FEVER score will be 0%. Re-run to update cache.")
     else:
-        # Multi-threaded batch retrieval (>10x faster!)
-        print("Using multi-threaded batch retrieval...")
-        eval_claims = [item['claim'] for item in eval_data]
+        if cached_evidence_text is not None:
+            print(f"  Cache size mismatch: {len(cached_evidence_text)} cached vs {len(eval_data)} examples. Re-retrieving...")
+        
+        eval_evidence = []
+        predicted_evidence_list = []  # Store for FEVER score computation
 
-        # Process in batches with progress bar
-        batch_size = 1000  # Process 1000 claims at a time
-        for i in tqdm(range(0, len(eval_claims), batch_size), desc="Evidence batches"):
-            batch_claims = eval_claims[i:i+batch_size]
-            batch_evidence = evidence_retriever.retrieve_evidence_batch(batch_claims)
-
-            for evidence in batch_evidence:
+        if isinstance(evidence_retriever, OracleEvidenceRetrieval):
+            # Oracle mode: must retrieve individually (needs gold evidence per claim)
+            for item in tqdm(eval_data, desc="Evidence retrieval"):
+                evidence = evidence_retriever.retrieve_evidence(
+                    item['claim'],
+                    item.get('evidence', [])
+                )
                 evidence_text = prepare_evidence_text(evidence)
                 eval_evidence.append(evidence_text)
                 predicted_evidence_list.append(evidence)
+        else:
+            # Multi-threaded batch retrieval (>10x faster!)
+            print("Using multi-threaded batch retrieval...")
+            eval_claims = [item['claim'] for item in eval_data]
+
+            # Process in batches with progress bar
+            batch_size = 1000  # Process 1000 claims at a time
+            for i in tqdm(range(0, len(eval_claims), batch_size), desc="Evidence batches"):
+                batch_claims = eval_claims[i:i+batch_size]
+                batch_evidence = evidence_retriever.retrieve_evidence_batch(batch_claims)
+
+                for evidence in batch_evidence:
+                    evidence_text = prepare_evidence_text(evidence)
+                    eval_evidence.append(evidence_text)
+                    predicted_evidence_list.append(evidence)
+        
+        # Cache both text and structured evidence for future runs
+        save_cached_evidence(eval_evidence, predicted_evidence_list, eval_evidence_cache)
 
     # Create dataset
     print("\nCreating dataset...")

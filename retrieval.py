@@ -539,7 +539,7 @@ class EvidenceRetrieval:
             List of evidence lists, one per claim
         """
         if num_workers is None:
-            num_workers = min(os.cpu_count() or 4, 8)  # Cap at 8 threads
+            num_workers = min(os.cpu_count() or 4, 16)  # Cap at 16 threads
 
         # Note: ThreadPool works here because scipy/numpy release the GIL
         # during matrix operations, allowing true parallelism
